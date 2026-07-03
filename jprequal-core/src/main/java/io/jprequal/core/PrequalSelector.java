@@ -8,9 +8,9 @@ public class PrequalSelector implements ReplicaSelector {
     private final List<String> replicas;
     private final ProbePool pool;
 
-    public PrequalSelector(List<String> replicas) {
+    public PrequalSelector(List<String> replicas, int maxSize, int probingRate, int rremove, double delta) {
         this.replicas = replicas;
-        pool = new ProbePool(replicas);
+        pool = new ProbePool(maxSize, probingRate, rremove, delta, replicas);
     }
 
     public void fireProbes() {

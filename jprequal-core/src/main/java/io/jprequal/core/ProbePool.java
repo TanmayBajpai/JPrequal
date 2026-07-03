@@ -33,10 +33,6 @@ public class ProbePool {
         this.httpClient = HttpClient.newHttpClient();
     }
 
-    public ProbePool(List<String> replicas) {
-        this(16, 2, 1, 1.0, replicas);
-    }
-
     private int computeBreuse() {
         int n = replicas.size();
         int m = maxSize;
