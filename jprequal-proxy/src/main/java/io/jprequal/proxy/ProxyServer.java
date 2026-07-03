@@ -1,7 +1,7 @@
 package io.jprequal.proxy;
 
 import com.sun.net.httpserver.HttpServer;
-import io.jprequal.core.RoundRobinSelector;
+import io.jprequal.core.PrequalSelector;
 
 import java.io.IOException;
 import java.io.OutputStream;
@@ -20,14 +20,14 @@ public class ProxyServer {
 
         List<String> replicas = Arrays.asList(args).subList(1, args.length);
 
-        RoundRobinSelector selector = new RoundRobinSelector();
+        PrequalSelector selector = new PrequalSelector(replicas);
 
         HttpClient client = HttpClient.newHttpClient();
 
         HttpServer server = HttpServer.create(new InetSocketAddress(port), 0);
         server.createContext("/work", exchange -> {
             try {
-                String selectedReplica = selector.select(replicas);
+                String selectedReplica = selector.select();
 
                 HttpRequest request = HttpRequest.newBuilder()
                         .uri(URI.create("http://" + selectedReplica + "/work"))
@@ -43,6 +43,8 @@ public class ProxyServer {
                 try (OutputStream os = exchange.getResponseBody()) {
                     os.write(body);
                 }
+
+                Thread.ofVirtual().start(selector::fireProbes);
             } catch (Exception e) {
                 e.printStackTrace();
             }
