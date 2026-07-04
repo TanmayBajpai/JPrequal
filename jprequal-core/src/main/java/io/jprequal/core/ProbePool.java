@@ -23,9 +23,6 @@ public class ProbePool implements AutoCloseable {
 
     private static final Pattern RIF_PATTERN = Pattern.compile("\"rif\":(\\d+)");
     private static final Pattern LATENCY_PATTERN = Pattern.compile("\"latencyEstimateMillis\":(\\d+)");
-    // Recent probe RIF values used to estimate the RIF distribution across
-    // replicas. Kept separate from the pool so "all pool probes are hot" is
-    // possible, as the HCL rule requires.
     private static final int RIF_HISTORY_SIZE = 128;
 
     private static final class PoolEntry {
@@ -59,9 +56,7 @@ public class ProbePool implements AutoCloseable {
             while (!Thread.currentThread().isInterrupted()) {
                 try {
                     Thread.sleep(500);
-                    if (poolSize() < 2) {
-                        fireProbes();
-                    }
+                    if (poolSize() < 2) fireProbes();
                 } catch (InterruptedException e) {
                     Thread.currentThread().interrupt();
                     return;
@@ -74,10 +69,6 @@ public class ProbePool implements AutoCloseable {
         return entries.size();
     }
 
-    /**
-     * breuse = max{1, (1+delta) / ((1 - m/n) * (rprobe - rremove))}, paper eq. (1).
-     * Config validation guarantees m < n and rprobe > rremove, so the rate is positive.
-     */
     private int computeBreuse() {
         int n = config.replicas().size();
         int m = config.maxSize();
@@ -86,23 +77,15 @@ public class ProbePool implements AutoCloseable {
         return Math.max(1, randomizedRound(breuse));
     }
 
-    /** Rounds to floor or ceiling with probability preserving the expectation. */
     private static int randomizedRound(double value) {
         int floor = (int) Math.floor(value);
         double frac = value - floor;
         return floor + (ThreadLocalRandom.current().nextDouble() < frac ? 1 : 0);
     }
 
-    /**
-     * The RIF value at the qRif quantile of recently observed probe RIFs.
-     * Probes with RIF strictly above this are hot. With no history yet,
-     * everything is cold.
-     */
     public synchronized int rifQuantileThreshold() {
         int n = (int) Math.min(rifHistoryCount, RIF_HISTORY_SIZE);
-        if (n == 0) {
-            return Integer.MAX_VALUE;
-        }
+        if (n == 0) return Integer.MAX_VALUE;
         int[] sorted = Arrays.copyOf(rifHistory, n);
         Arrays.sort(sorted);
         int index = Math.min((int) (config.qRif() * n), n - 1);
@@ -112,9 +95,7 @@ public class ProbePool implements AutoCloseable {
     public synchronized void addProbe(Probe probe) {
         rifHistory[(int) (rifHistoryCount % RIF_HISTORY_SIZE)] = probe.rif();
         rifHistoryCount++;
-        if (entries.size() >= config.maxSize()) {
-            entries.removeFirst();
-        }
+        if (entries.size() >= config.maxSize()) entries.removeFirst();
         entries.add(new PoolEntry(probe));
     }
 
@@ -131,8 +112,6 @@ public class ProbePool implements AutoCloseable {
             entries.removeFirst();
         } else {
             int threshold = rifQuantileThreshold();
-            // If at least one probe is hot, remove the hot probe with the
-            // highest RIF; otherwise the cold probe with the highest latency.
             PoolEntry worst = entries.stream()
                     .filter(e -> e.probe.rif() > threshold)
                     .max(Comparator.comparingInt(e -> e.probe.rif()))
@@ -159,8 +138,6 @@ public class ProbePool implements AutoCloseable {
                 if (entry.uses >= breuse) {
                     it.remove();
                 } else {
-                    // Client-side staleness compensation: we just sent this
-                    // replica a query, so bump the RIF on its probe.
                     Probe p = entry.probe;
                     entry.probe = new Probe(p.replica(), p.timestamp(), p.rif() + 1, p.latencyEstimate());
                 }
@@ -169,24 +146,18 @@ public class ProbePool implements AutoCloseable {
         }
 
         int removals = randomizedRound(config.rremove());
-        for (int i = 0; i < removals; i++) {
-            removeWorst();
-        }
+        for (int i = 0; i < removals; i++) removeWorst();
     }
 
     public void fireProbes() {
         List<String> healthy = healthyReplicas();
         if (!healthy.isEmpty()) {
-            // Sample probe targets uniformly at random without replacement.
             List<String> targets = new ArrayList<>(healthy);
             Collections.shuffle(targets, ThreadLocalRandom.current());
             int count = Math.min(randomizedRound(config.probingRate()), targets.size());
-            for (int i = 0; i < count; i++) {
-                probeAsync(targets.get(i));
-            }
+            for (int i = 0; i < count; i++) probeAsync(targets.get(i));
         }
 
-        // Periodically re-probe unhealthy replicas so they can recover.
         long now = System.nanoTime();
         long recoveryNanos = config.recoveryIntervalMs() * 1_000_000L;
         for (String replica : config.replicas()) {
@@ -221,11 +192,11 @@ public class ProbePool implements AutoCloseable {
                     recordFailure(replica, "unparseable probe response: " + response.body(), null);
                     return;
                 }
-                int rif = Integer.parseInt(rifMatcher.group(1));
-                int latency = Integer.parseInt(latencyMatcher.group(1));
 
                 recordSuccess(replica);
-                addProbe(new Probe(replica, System.nanoTime(), rif, latency));
+                addProbe(new Probe(replica, System.nanoTime(),
+                        Integer.parseInt(rifMatcher.group(1)),
+                        Integer.parseInt(latencyMatcher.group(1))));
             } catch (Exception e) {
                 recordFailure(replica, "probe failed", e);
             }
@@ -243,8 +214,8 @@ public class ProbePool implements AutoCloseable {
     public void recordFailure(String replica, String reason, Exception e) {
         int failures = failureCounts.merge(replica, 1, Integer::sum);
         if (failures == config.maxFailures()) {
-            logger.warning("Replica " + replica + " marked unhealthy after " + failures
-                    + " consecutive failures (" + reason + ")");
+            logger.warning("Replica " + replica + " marked unhealthy after "
+                    + failures + " consecutive failures (" + reason + ")");
         } else {
             logger.log(Level.FINE, "Failure for replica " + replica + ": " + reason, e);
         }

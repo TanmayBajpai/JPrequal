@@ -2,10 +2,8 @@ package io.jprequal.core;
 
 import java.util.List;
 
-/**
- * Validated Prequal parameters. Rates may be fractional (paper, footnote 7);
- * they are randomly rounded per query to preserve the expectation.
- */
+// Validated Prequal parameters. Rates may be fractional
+
 public record PrequalConfig(
         List<String> replicas,
         int maxSize,

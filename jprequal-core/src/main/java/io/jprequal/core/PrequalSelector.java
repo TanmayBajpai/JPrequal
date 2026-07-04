@@ -18,11 +18,8 @@ public class PrequalSelector implements ReplicaSelector, AutoCloseable {
     }
 
     public void reportQueryOutcome(String replica, boolean success) {
-        if (success) {
-            pool.recordSuccess(replica);
-        } else {
-            pool.recordFailure(replica, "query failed", null);
-        }
+        if (success) pool.recordSuccess(replica);
+        else pool.recordFailure(replica, "query failed", null);
     }
 
     @Override
@@ -31,15 +28,10 @@ public class PrequalSelector implements ReplicaSelector, AutoCloseable {
 
         if (probePool.size() < 2) {
             List<String> candidates = pool.healthyReplicas();
-            if (candidates.isEmpty()) {
-                candidates = config.replicas();
-            }
+            if (candidates.isEmpty()) candidates = config.replicas();
             return candidates.get(ThreadLocalRandom.current().nextInt(candidates.size()));
         }
 
-        // HCL rule: hot if RIF exceeds the qRif quantile of the estimated RIF
-        // distribution. Cold probes compete on latency; if all are hot, pick
-        // the lowest RIF.
         int threshold = pool.rifQuantileThreshold();
         List<Probe> coldProbes = probePool.stream()
                 .filter(p -> p.rif() <= threshold)
