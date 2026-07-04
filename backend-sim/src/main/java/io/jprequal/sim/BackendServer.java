@@ -82,8 +82,8 @@ public class BackendServer {
                     Thread.currentThread().interrupt();
                 } finally {
                     long latency = System.currentTimeMillis() - start;
-                    latencyByRif.computeIfAbsent(arrivalRif, _ -> new long[32]);
-                    indexByRif.computeIfAbsent(arrivalRif, _ -> new AtomicInteger(0));
+                    latencyByRif.computeIfAbsent(arrivalRif, k -> new long[32]);
+                    indexByRif.computeIfAbsent(arrivalRif, k -> new AtomicInteger(0));
                     int index = indexByRif.get(arrivalRif).getAndIncrement() % 32;
                     latencyByRif.get(arrivalRif)[index] = latency;
                     rif.decrementAndGet();
