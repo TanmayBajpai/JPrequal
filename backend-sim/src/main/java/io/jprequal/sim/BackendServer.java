@@ -12,8 +12,12 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Semaphore;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.logging.Level;
+import java.util.logging.Logger;
 
 public class BackendServer {
+
+    private static final Logger logger = Logger.getLogger(BackendServer.class.getName());
 
     static long[] findNearestBucket(Map<Integer, long[]> latencyByRif, int rif) {
         int l = rif - 1;
@@ -50,10 +54,10 @@ public class BackendServer {
                 try {
                     Thread.sleep(20_000);
                     slow.set(true);
-                    System.out.println("Port " + port + " slowing down");
+                    logger.info("Port " + port + " slowing down");
                     Thread.sleep(3_000);
                     slow.set(false);
-                    System.out.println("Port " + port + " back to normal");
+                    logger.info("Port " + port + " back to normal");
                 } catch (InterruptedException e) {
                     Thread.currentThread().interrupt();
                     return;
@@ -78,15 +82,15 @@ public class BackendServer {
                     Thread.currentThread().interrupt();
                 } finally {
                     long latency = System.currentTimeMillis() - start;
-                    latencyByRif.computeIfAbsent(arrivalRif, k -> new long[32]);
-                    indexByRif.computeIfAbsent(arrivalRif, k -> new AtomicInteger(0));
+                    latencyByRif.computeIfAbsent(arrivalRif, _ -> new long[32]);
+                    indexByRif.computeIfAbsent(arrivalRif, _ -> new AtomicInteger(0));
                     int index = indexByRif.get(arrivalRif).getAndIncrement() % 32;
                     latencyByRif.get(arrivalRif)[index] = latency;
                     rif.decrementAndGet();
                     capacity.release();
                 }
             } catch (Exception e) {
-                e.printStackTrace();
+                logger.log(Level.WARNING, "Error handling /work request", e);
             }
         });
 
@@ -110,12 +114,12 @@ public class BackendServer {
                     os.write(bytes);
                 }
             } catch (Exception e) {
-                e.printStackTrace();
+                logger.log(Level.WARNING, "Error handling /probe request", e);
             }
         });
 
         server.setExecutor(Executors.newVirtualThreadPerTaskExecutor());
         server.start();
-        System.out.println("Backend started on port " + port);
+        logger.info("Backend started on port " + port);
     }
 }

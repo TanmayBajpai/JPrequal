@@ -4,9 +4,12 @@ import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import java.time.Duration;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ThreadLocalRandom;
+import java.util.logging.Level;
+import java.util.logging.Logger;
 
 public class ProbePool {
     private final int maxSize;
@@ -18,8 +21,13 @@ public class ProbePool {
     private final Map<Probe, Integer> useCounts;
     private final HttpClient httpClient;
     private boolean removeOldestNext = true;
+    private final int probeTimeout;
+    private final Map<String, Integer> failureCounts = new ConcurrentHashMap<>();
+    private final int maxFailures;
 
-    public ProbePool(int maxSize, int probingRate, int rremove, double delta, List<String> replicas) {
+    private final static Logger logger = Logger.getLogger(ProbePool.class.getName());
+
+    public ProbePool(int maxSize, int probingRate, int rremove, double delta, List<String> replicas, int probeTimeout, int maxFailures) {
         this.maxSize = maxSize;
         this.probingRate = probingRate;
         this.rremove = rremove;
@@ -27,9 +35,27 @@ public class ProbePool {
         this.replicas = replicas;
         this.probes = Collections.synchronizedList(new ArrayList<>());
         this.useCounts = new ConcurrentHashMap<>();
-        this.httpClient = HttpClient.newHttpClient();
+        this.probeTimeout = probeTimeout;
+        this.maxFailures = maxFailures;
+        this.httpClient = HttpClient.newBuilder()
+                .connectTimeout(Duration.ofMillis(probeTimeout))
+                .build();
 
         validate();
+
+        Thread.ofVirtual().start(() -> {
+            while (true) {
+                try {
+                    Thread.sleep(500);
+                    if (probes.size() < 2) {
+                        fireProbes();
+                    }
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    return;
+                }
+            }
+        });
     }
 
     private void validate() {
@@ -51,6 +77,9 @@ public class ProbePool {
         if (delta <= 0) {
             throw new IllegalArgumentException("delta must be greater than 0");
         }
+        if (maxFailures <= 0) {
+            throw new IllegalArgumentException("max_failures must be greater than 0");
+        }
     }
 
     private int computeBreuse() {
@@ -58,7 +87,7 @@ public class ProbePool {
         int m = maxSize;
         double rate = (1.0 - (double) m / n) * probingRate - rremove;
         if (rate <= 0) {
-            System.out.println("WARNING: rremove too high relative to probingRate, pool may drain");
+            logger.warning("rremove too high relative to probingRate, pool may drain");
             return 1;
         }
         double breuse = (1.0 + delta) / rate;
@@ -120,7 +149,7 @@ public class ProbePool {
 
     public synchronized List<Probe> getProbePool() {
         evictStale();
-        return new ArrayList<>(probes);
+        return probes.stream().filter(p -> isHealthy(p.replica())).toList();
     }
 
     public synchronized void onQueryServed(Probe usedProbe) {
@@ -141,11 +170,14 @@ public class ProbePool {
 
     public void fireProbes() {
         for (int i = 0; i < probingRate; i++) {
-            String replica = replicas.get(ThreadLocalRandom.current().nextInt(replicas.size()));
+            List<String> healthy = replicas.stream().filter(this::isHealthy).toList();
+            if (healthy.isEmpty()) return;
+            String replica = healthy.get(ThreadLocalRandom.current().nextInt(healthy.size()));
             Thread.ofVirtual().start(() -> {
                 try {
                     HttpRequest request = HttpRequest.newBuilder()
                             .uri(URI.create("http://" + replica + "/probe"))
+                            .timeout(Duration.ofMillis(probeTimeout))
                             .GET()
                             .build();
 
@@ -155,12 +187,19 @@ public class ProbePool {
                     int rif = Integer.parseInt(body.replaceAll(".*\"rif\":(\\d+).*", "$1"));
                     int latency = Integer.parseInt(body.replaceAll(".*\"latencyEstimateMillis\":(\\d+).*", "$1"));
 
+                    failureCounts.put(replica, 0);
+
                     Probe probe = new Probe(replica, System.nanoTime(), rif, latency);
                     addProbe(probe);
                 } catch (Exception e) {
-                    e.printStackTrace();
+                    failureCounts.merge(replica, 1, Integer::sum);
+                    logger.log(Level.WARNING, "Probe failed for replica " + replica, e);
                 }
             });
         }
+    }
+
+    private boolean isHealthy(String replica) {
+        return failureCounts.getOrDefault(replica, 0) < maxFailures;
     }
 }
