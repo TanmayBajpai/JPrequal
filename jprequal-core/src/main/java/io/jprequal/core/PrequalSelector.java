@@ -1,21 +1,28 @@
 package io.jprequal.core;
 
-import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
 import java.util.concurrent.ThreadLocalRandom;
 
-public class PrequalSelector implements ReplicaSelector {
-    private final List<String> replicas;
+public class PrequalSelector implements ReplicaSelector, AutoCloseable {
+    private final PrequalConfig config;
     private final ProbePool pool;
 
-    public PrequalSelector(List<String> replicas, int maxSize, int probingRate, int rremove, double delta, int probeTimeout, int maxFailures) {
-        this.replicas = replicas;
-        pool = new ProbePool(maxSize, probingRate, rremove, delta, replicas, probeTimeout, maxFailures);
+    public PrequalSelector(PrequalConfig config) {
+        this.config = config;
+        this.pool = new ProbePool(config);
     }
 
     public void fireProbes() {
         pool.fireProbes();
+    }
+
+    public void reportQueryOutcome(String replica, boolean success) {
+        if (success) {
+            pool.recordSuccess(replica);
+        } else {
+            pool.recordFailure(replica, "query failed", null);
+        }
     }
 
     @Override
@@ -23,27 +30,31 @@ public class PrequalSelector implements ReplicaSelector {
         List<Probe> probePool = pool.getProbePool();
 
         if (probePool.size() < 2) {
-            return replicas.get(ThreadLocalRandom.current().nextInt(replicas.size()));
+            List<String> candidates = pool.healthyReplicas();
+            if (candidates.isEmpty()) {
+                candidates = config.replicas();
+            }
+            return candidates.get(ThreadLocalRandom.current().nextInt(candidates.size()));
         }
 
-        int[] rifs = probePool.stream().mapToInt(Probe::rif).sorted().toArray();
-        int threshold = rifs[(int)(0.84 * rifs.length)];
+        // HCL rule: hot if RIF exceeds the qRif quantile of the estimated RIF
+        // distribution. Cold probes compete on latency; if all are hot, pick
+        // the lowest RIF.
+        int threshold = pool.rifQuantileThreshold();
+        List<Probe> coldProbes = probePool.stream()
+                .filter(p -> p.rif() <= threshold)
+                .toList();
 
-        List<Probe> coldProbes = new ArrayList<>();
-        for (Probe probe : probePool) {
-            if (probe.rif() <= threshold) coldProbes.add(probe);
-        }
+        Probe selected = coldProbes.isEmpty()
+                ? probePool.stream().min(Comparator.comparingInt(Probe::rif)).orElseThrow()
+                : coldProbes.stream().min(Comparator.comparingInt(Probe::latencyEstimate)).orElseThrow();
 
-        if (coldProbes.isEmpty()) {
-            probePool.sort(Comparator.comparingInt(Probe::rif));
-            Probe selected = probePool.getFirst();
-            pool.onQueryServed(selected);
-            return selected.replica();
-        }
-
-        coldProbes.sort(Comparator.comparingInt(Probe::latencyEstimate));
-        Probe selected = coldProbes.getFirst();
         pool.onQueryServed(selected);
         return selected.replica();
+    }
+
+    @Override
+    public void close() {
+        pool.close();
     }
 }

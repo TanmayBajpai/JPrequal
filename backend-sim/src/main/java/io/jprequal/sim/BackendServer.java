@@ -6,6 +6,7 @@ import java.io.IOException;
 import java.io.OutputStream;
 import java.net.InetSocketAddress;
 import java.util.Arrays;
+import java.util.Comparator;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
@@ -19,33 +20,47 @@ public class BackendServer {
 
     private static final Logger logger = Logger.getLogger(BackendServer.class.getName());
 
-    static long[] findNearestBucket(Map<Integer, long[]> latencyByRif, int rif) {
-        int l = rif - 1;
-        int r = rif + 1;
+    private static final int MAX_CONCURRENCY = 20;
+    private static final int SAMPLES_PER_BUCKET = 32;
 
-        while (l >= 0 || r <= 20) {
-            if (l >= 0 && latencyByRif.containsKey(l)) {
-                return latencyByRif.get(l);
-            }
-            if (r <= 20 && latencyByRif.containsKey(r)) {
-                return latencyByRif.get(r);
-            }
-            l--;
-            r++;
+    /** Ring buffer of recent latency samples for one arrival-RIF value. */
+    static final class Bucket {
+        private final long[] samples = new long[SAMPLES_PER_BUCKET];
+        private long count = 0;
+
+        synchronized void record(long latencyMillis) {
+            samples[(int) (count % SAMPLES_PER_BUCKET)] = latencyMillis;
+            count++;
         }
 
-        return new long[32];
+        synchronized boolean hasSamples() {
+            return count > 0;
+        }
+
+        synchronized long median() {
+            int n = (int) Math.min(count, SAMPLES_PER_BUCKET);
+            long[] copy = Arrays.copyOf(samples, n);
+            Arrays.sort(copy);
+            return n % 2 == 1 ? copy[n / 2] : (copy[n / 2 - 1] + copy[n / 2]) / 2;
+        }
+    }
+
+    static Bucket findNearestBucket(Map<Integer, Bucket> latencyByRif, int rif) {
+        return latencyByRif.entrySet().stream()
+                .filter(e -> e.getValue().hasSamples())
+                .min(Comparator.comparingInt(e -> Math.abs(e.getKey() - rif)))
+                .map(Map.Entry::getValue)
+                .orElse(null);
     }
 
     static void main(String[] args) throws IOException {
         int port = args.length > 0 ? Integer.parseInt(args[0]) : 8080;
 
-        Semaphore capacity = new Semaphore(20);
+        Semaphore capacity = new Semaphore(MAX_CONCURRENCY);
 
         AtomicInteger rif = new AtomicInteger(0);
 
-        Map<Integer, long[]> latencyByRif = new ConcurrentHashMap<>();
-        Map<Integer, AtomicInteger> indexByRif = new ConcurrentHashMap<>();
+        Map<Integer, Bucket> latencyByRif = new ConcurrentHashMap<>();
 
         AtomicBoolean slow = new AtomicBoolean(false);
 
@@ -65,12 +80,20 @@ public class BackendServer {
             }
         });
 
+        server(port, capacity, rif, latencyByRif, slow);
+    }
+
+    private static void server(int port, Semaphore capacity, AtomicInteger rif,
+                               Map<Integer, Bucket> latencyByRif, AtomicBoolean slow) throws IOException {
         HttpServer server = HttpServer.create(new InetSocketAddress(port), 0);
         server.createContext("/work", exchange -> {
+            // The query arrives now: RIF and latency must include any time
+            // spent queued on the capacity semaphore, or both signals go
+            // blind exactly when the replica is overloaded.
+            int arrivalRif = rif.incrementAndGet();
+            long start = System.currentTimeMillis();
             try {
                 capacity.acquire();
-                int arrivalRif = rif.incrementAndGet();
-                long start = System.currentTimeMillis();
                 try {
                     Thread.sleep(slow.get() ? 500 : 100);
                     byte[] response = "OK".getBytes();
@@ -78,35 +101,33 @@ public class BackendServer {
                     try (OutputStream os = exchange.getResponseBody()) {
                         os.write(response);
                     }
-                } catch (InterruptedException e) {
-                    Thread.currentThread().interrupt();
                 } finally {
-                    long latency = System.currentTimeMillis() - start;
-                    latencyByRif.computeIfAbsent(arrivalRif, k -> new long[32]);
-                    indexByRif.computeIfAbsent(arrivalRif, k -> new AtomicInteger(0));
-                    int index = indexByRif.get(arrivalRif).getAndIncrement() % 32;
-                    latencyByRif.get(arrivalRif)[index] = latency;
-                    rif.decrementAndGet();
                     capacity.release();
                 }
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
             } catch (Exception e) {
                 logger.log(Level.WARNING, "Error handling /work request", e);
+            } finally {
+                long latency = System.currentTimeMillis() - start;
+                latencyByRif.computeIfAbsent(arrivalRif, k -> new Bucket()).record(latency);
+                rif.decrementAndGet();
+                exchange.close();
             }
         });
 
         server.createContext("/probe", exchange -> {
             try {
                 int currentRif = rif.get();
-                long[] buffer = latencyByRif.get(currentRif);
-                if (buffer == null) {
-                    buffer = findNearestBucket(latencyByRif, currentRif);
+                Bucket bucket = latencyByRif.get(currentRif);
+                if (bucket == null || !bucket.hasSamples()) {
+                    bucket = findNearestBucket(latencyByRif, currentRif);
                 }
-                long[] bufferCopy = Arrays.copyOf(buffer, 32);
-                Arrays.sort(bufferCopy);
+                // A replica that has never served a query reports 0: it is
+                // genuinely idle, so it should look attractive.
+                long medianLatency = bucket == null ? 0 : bucket.median();
 
-                long medianLatency = bufferCopy[16];
-
-                String body = "{\"rif\":" + rif.get() + ",\"latencyEstimateMillis\":" + medianLatency + "}";
+                String body = "{\"rif\":" + currentRif + ",\"latencyEstimateMillis\":" + medianLatency + "}";
                 byte[] bytes = body.getBytes();
                 exchange.getResponseHeaders().set("Content-Type", "application/json");
                 exchange.sendResponseHeaders(200, bytes.length);
@@ -115,6 +136,8 @@ public class BackendServer {
                 }
             } catch (Exception e) {
                 logger.log(Level.WARNING, "Error handling /probe request", e);
+            } finally {
+                exchange.close();
             }
         });
 
