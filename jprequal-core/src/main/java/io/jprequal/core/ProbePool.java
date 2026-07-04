@@ -4,10 +4,7 @@ import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
-import java.util.ArrayList;
-import java.util.Collections;
-import java.util.List;
-import java.util.Map;
+import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ThreadLocalRandom;
 
@@ -31,13 +28,39 @@ public class ProbePool {
         this.probes = Collections.synchronizedList(new ArrayList<>());
         this.useCounts = new ConcurrentHashMap<>();
         this.httpClient = HttpClient.newHttpClient();
+
+        validate();
+    }
+
+    private void validate() {
+        if (replicas.isEmpty()) {
+            throw new IllegalArgumentException("Replicas list cannot be empty");
+        }
+        if (maxSize <= 0) {
+            throw new IllegalArgumentException("max_size must be greater than 0");
+        }
+        if (maxSize >= replicas.size()) {
+            throw new IllegalArgumentException("max_size (" + maxSize + ") must be less than number of replicas (" + replicas.size() + ")");
+        }
+        if (probingRate <= 0) {
+            throw new IllegalArgumentException("probing_rate must be greater than 0");
+        }
+        if (rremove < 0) {
+            throw new IllegalArgumentException("rremove cannot be negative");
+        }
+        if (delta <= 0) {
+            throw new IllegalArgumentException("delta must be greater than 0");
+        }
     }
 
     private int computeBreuse() {
         int n = replicas.size();
         int m = maxSize;
         double rate = (1.0 - (double) m / n) * probingRate - rremove;
-        if (rate <= 0) return 1;
+        if (rate <= 0) {
+            System.out.println("WARNING: rremove too high relative to probingRate, pool may drain");
+            return 1;
+        }
         double breuse = (1.0 + delta) / rate;
         return (int) Math.max(1, breuse);
     }
@@ -80,11 +103,11 @@ public class ProbePool {
             if (anyHot) {
                 worst = probes.stream()
                         .filter(p -> p.rif() > threshold)
-                        .max((a, b) -> a.rif() - b.rif())
+                        .max(Comparator.comparingInt(Probe::rif))
                         .orElseThrow();
             } else {
                 worst = probes.stream()
-                        .max((a, b) -> a.latencyEstimate() - b.latencyEstimate())
+                        .max(Comparator.comparingInt(Probe::latencyEstimate))
                         .orElseThrow();
             }
 
