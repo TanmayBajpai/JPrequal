@@ -64,7 +64,7 @@ probing_rate=3
 rremove=1
 delta=1.0
 q_rif=0.84
-probe_timeout_ms=100
+probe_timeout_ms=1000
 probe_staleness_ms=1000
 recovery_interval_ms=5000
 max_failures=5
@@ -166,7 +166,7 @@ PrequalConfig config = new PrequalConfig(
     /* probingRate */        2.0,
     /* rremove */            1.0,
     /* delta */              1.0,
-    /* probeTimeoutMs */     100,
+    /* probeTimeoutMs */     1000,
     /* maxFailures */        5,
     /* qRif */               0.84,
     /* probeStalenessMs */   1000L,

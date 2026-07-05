@@ -63,7 +63,7 @@ public class ProxyServer {
 
             prequalConfig = new PrequalConfig(
                     replicas,
-                    Integer.parseInt(config.getProperty("max_size", "4")),
+                    Integer.parseInt(config.getProperty("max_size", "16")),
                     Double.parseDouble(config.getProperty("probing_rate", "2")),
                     Double.parseDouble(config.getProperty("rremove", "1")),
                     Double.parseDouble(config.getProperty("delta", "1.0")),
