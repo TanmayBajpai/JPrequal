@@ -8,8 +8,25 @@
     <parent>
         <groupId>io.jprequal</groupId>
         <artifactId>jprequal</artifactId>
-        <version>1.0.0</version>
+        <version>0.1.0</version>
     </parent>
+
+    <build>
+        <plugins>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-jar-plugin</artifactId>
+                <version>3.3.0</version>
+                <configuration>
+                    <archive>
+                        <manifest>
+                            <mainClass>io.jprequal.loadgen.LoadGenerator</mainClass>
+                        </manifest>
+                    </archive>
+                </configuration>
+            </plugin>
+        </plugins>
+    </build>
 
     <artifactId>loadgen</artifactId>
 </project>
