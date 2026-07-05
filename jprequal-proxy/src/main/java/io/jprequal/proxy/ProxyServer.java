@@ -34,7 +34,7 @@ public class ProxyServer {
     private static final Set<String> NON_RETRYABLE_METHODS = Set.of("POST", "PATCH");
 
     static void main(String[] args) throws IOException {
-        String configPath = args.length > 0 ? args[0] : "JPrequal.conf";
+        String configPath = args.length > 0 ? args[0] : "proxy.conf";
 
         Properties config = new Properties();
         try (InputStream in = new FileInputStream(configPath)) {

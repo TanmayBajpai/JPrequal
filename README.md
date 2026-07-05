@@ -25,6 +25,7 @@ At YouTube, Prequal reduced tail latency by 2x, tail RIF by 5-10x, and tail memo
 | `jprequal-core` | The Prequal algorithm. No I/O dependencies beyond the JDK. |
 | `jprequal-proxy` | HTTP reverse proxy using `jprequal-core` for backend selection. |
 | `backend-sim` | Simulated backends with RIF tracking, latency bucketing, and antagonist load for testing. |
+| `loadgen` | Open-loop HTTP load generator with dynamic traffic patterns for exercising the proxy. |
 
 ---
 
@@ -83,6 +84,62 @@ mvn exec:java -Dexec.mainClass="io.jprequal.proxy.ProxyServer"
 ```bash
 curl http://localhost:8080/your/endpoint
 ```
+
+### 6. Generate load
+
+```bash
+cd loadgen
+mvn exec:java -Dexec.mainClass="io.jprequal.loadgen.LoadGenerator" \
+    -Dexec.args="../loadgen.conf pattern=sine min_qps=20 max_qps=200"
+```
+
+---
+
+## Load generation
+
+The `loadgen` module drives configurable traffic at a target URL and reports throughput and latency percentiles. It is **open-loop**: arrivals follow the configured schedule regardless of how fast responses come back, so a struggling proxy or backend cannot slow the generator down and mask its own queueing (coordinated omission).
+
+Configuration comes from `loadgen.conf` (or a config file passed as the first argument), and any key can be overridden with `key=value` arguments:
+
+```bash
+java -jar loadgen/target/loadgen-0.1.0.jar loadgen.conf qps=500 duration_s=120
+```
+
+### Traffic patterns
+
+| Pattern | Shape |
+|---------|-------|
+| `constant` | `qps` for the whole run |
+| `ramp` | `min_qps` → `max_qps` linearly over `duration_s` |
+| `sine` | Oscillates between `min_qps` and `max_qps` with period `period_s`, starting at `min_qps` |
+| `step` | `min_qps` → `max_qps` in `steps` equal levels over `duration_s` |
+| `spike` | `qps` baseline, bursting to `max_qps` for `burst_s` at the start of every `period_s` |
+
+Arrivals within the schedule are Poisson by default (realistic, bursty) or evenly spaced with `arrival=uniform`.
+
+### Load generator configuration
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `target` | `http://localhost:8080/work` | URL to send requests to |
+| `method` | `GET` | HTTP method |
+| `body` | — | Optional request body |
+| `headers` | — | Optional headers, semicolon-separated (`Name: Value; Name2: Value2`) |
+| `pattern` | `constant` | Traffic pattern (see above) |
+| `qps` | `100` | Base rate: the constant rate, or the spike baseline |
+| `min_qps` | `0` | Lower rate bound for ramp/sine/step |
+| `max_qps` | `qps` | Upper rate bound for ramp/sine/step and the spike burst rate |
+| `period_s` | `30` | Cycle length for sine and spike patterns |
+| `burst_s` | `5` | Burst length for the spike pattern |
+| `steps` | `5` | Number of levels for the step pattern |
+| `duration_s` | `60` | Measured run length in seconds |
+| `warmup_s` | `0` | Warmup before measurement starts, excluded from the final summary |
+| `arrival` | `poisson` | Arrival process: `poisson` or `uniform` |
+| `request_timeout_ms` | `5000` | Per-request timeout; timeouts count as errors |
+| `report_interval_s` | `5` | Progress report interval |
+| `max_in_flight` | `10000` | Cap on concurrent requests; arrivals beyond it are dropped, not queued |
+
+Progress is reported per interval, and a final summary gives throughput, error counts, and mean/p50/p90/p99/p99.9/max latency over the measured window.
 
 ---
 
