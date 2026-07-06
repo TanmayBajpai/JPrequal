@@ -24,7 +24,7 @@ At YouTube, Prequal reduced tail latency by 2x, tail RIF by 5-10x, and tail memo
 |--------|-------------|
 | `jprequal-core` | The Prequal algorithm. No I/O dependencies beyond the JDK. |
 | `jprequal-proxy` | HTTP reverse proxy using `jprequal-core` for backend selection. |
-| `backend-sim` | Simulated backends with RIF tracking, latency bucketing, and antagonist load for testing. |
+| `backend-sim` | Simulated backends with RIF tracking, latency bucketing, and heterogeneous antagonist load. |
 | `loadgen` | Open-loop HTTP load generator with dynamic traffic patterns for exercising the proxy. |
 
 ---
@@ -50,17 +50,17 @@ mvn clean install
 ./start-backends.sh 8
 ```
 
-Starts 8 backend servers on ports 9001–9008.
+Starts 8 backend servers on ports 9001–9008. Each backend gets a random seed (0–100) that determines its base latency and throttling behavior — higher seed means slower and more frequently throttled.
 
 ### 3. Configure
 
-Edit `JPrequal.conf`:
+Edit `proxy.conf`:
 
 ```properties
 port=8080
 replicas=localhost:9001,localhost:9002,localhost:9003,localhost:9004,localhost:9005,localhost:9006,localhost:9007,localhost:9008
-max_size=4
-probing_rate=3
+max_size=16
+probing_rate=2
 rremove=1
 delta=1.0
 q_rif=0.84
@@ -69,7 +69,7 @@ probe_staleness_ms=1000
 recovery_interval_ms=5000
 max_failures=5
 max_retries=2
-request_timeout_ms=5000
+request_timeout_ms=1000
 ```
 
 ### 4. Start the proxy
@@ -92,6 +92,24 @@ cd loadgen
 mvn exec:java -Dexec.mainClass="io.jprequal.loadgen.LoadGenerator" \
     -Dexec.args="../loadgen.conf pattern=sine min_qps=20 max_qps=200"
 ```
+
+---
+
+## Results
+
+Benchmark run against 8 heterogeneous backends at 300 QPS constant load with a 5s warmup. Backends have randomized base latency (100–200ms) and throttling behavior. Prequal learns to avoid slower backends; Round Robin distributes evenly regardless.
+
+| Metric | Prequal | Round Robin | Improvement |
+|--------|---------|-------------|-------------|
+| mean | 160ms | 340ms | 2.1x |
+| p50 | 142ms | 169ms | 1.2x |
+| p90 | 182ms | 1037ms | 5.7x |
+| p99 | 728ms | 2255ms | 3.1x |
+| p99.9 | 796ms | 2907ms | 3.6x |
+| max | 798ms | 2949ms | 3.7x |
+| errors | 0 | 0 | — |
+
+The p90 result is the most significant — Prequal detects rising RIF and latency on throttling backends and routes around them. Round Robin keeps distributing traffic evenly, causing queue buildup on slower replicas.
 
 ---
 
@@ -162,7 +180,7 @@ If you are running an existing RPC framework (gRPC, Netty, etc.) and want to int
 ```java
 PrequalConfig config = new PrequalConfig(
     List.of("host1:8080", "host2:8080", "host3:8080"),
-    /* maxSize */            4,
+    /* maxSize */            16,
     /* probingRate */        2.0,
     /* rremove */            1.0,
     /* delta */              1.0,
@@ -189,17 +207,17 @@ try (PrequalSelector selector = new PrequalSelector(config)) {
 |-----------|---------|-------------|
 | `port` | `8080` | Port the proxy listens on |
 | `replicas` | — | Comma-separated list of `host:port` backend addresses |
-| `max_size` | `4` | Maximum probe pool size. Must be less than the number of replicas. |
+| `max_size` | `16` | Maximum probe pool size. Must be less than the number of replicas. |
 | `probing_rate` | `2` | Probes fired per request. Fractional values supported. |
 | `rremove` | `1` | Probes removed per request for degradation control. Must be less than `probing_rate`. |
 | `delta` | `1.0` | Controls net probe accumulation rate in the pool (δ > 0). |
 | `q_rif` | `0.84` | RIF quantile threshold separating hot from cold replicas (paper recommends 0.6–0.9). |
-| `probe_timeout_ms` | `100` | Timeout for probe requests in milliseconds. |
+| `probe_timeout_ms` | `1000` | Timeout for probe requests in milliseconds. |
 | `probe_staleness_ms` | `1000` | Maximum probe age before eviction. |
 | `recovery_interval_ms` | `5000` | Interval at which unhealthy replicas are re-probed for recovery. |
 | `max_failures` | `5` | Consecutive failures before a replica is marked unhealthy. |
 | `max_retries` | `2` | Maximum retry attempts for idempotent requests (GET, PUT, DELETE, HEAD). POST and PATCH are not retried. |
-| `request_timeout_ms` | `5000` | Timeout for upstream requests in milliseconds. |
+| `request_timeout_ms` | `1000` | Timeout for upstream requests in milliseconds. |
 
 ---
 
