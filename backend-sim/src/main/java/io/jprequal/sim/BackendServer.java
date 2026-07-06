@@ -11,6 +11,7 @@ import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Semaphore;
+import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.logging.Level;
@@ -23,7 +24,9 @@ public class BackendServer {
     private static final int MAX_CONCURRENCY = 20;
     private static final int SAMPLES_PER_BUCKET = 32;
 
-    /** Ring buffer of recent latency samples for one arrival-RIF value. */
+    private static final double seed = ThreadLocalRandom.current().nextDouble();
+
+    // Ring buffer of recent latency samples for one arrival-RIF value.
     static final class Bucket {
         private final long[] samples = new long[SAMPLES_PER_BUCKET];
         private long count = 0;
@@ -64,13 +67,18 @@ public class BackendServer {
 
         AtomicBoolean slow = new AtomicBoolean(false);
 
+        int baseLatency = (100 + (int) (seed * 100));
+        long throttleInterval = (30 - (int) (15 * seed)) * 1000;
+        long throttleDuration = (2 + (int) (seed * 6)) * 1000;
+        int slowMultiplier = 2 + (int) (seed * 3);
+
         Thread.ofVirtual().start(() -> {
             while (true) {
                 try {
-                    Thread.sleep(20_000);
+                    Thread.sleep(throttleInterval);
                     slow.set(true);
                     logger.info("Port " + port + " slowing down");
-                    Thread.sleep(3_000);
+                    Thread.sleep(throttleDuration);
                     slow.set(false);
                     logger.info("Port " + port + " back to normal");
                 } catch (InterruptedException e) {
@@ -80,22 +88,19 @@ public class BackendServer {
             }
         });
 
-        server(port, capacity, rif, latencyByRif, slow);
+        server(port, capacity, rif, latencyByRif, slow, baseLatency, slowMultiplier);
     }
 
     private static void server(int port, Semaphore capacity, AtomicInteger rif,
-                               Map<Integer, Bucket> latencyByRif, AtomicBoolean slow) throws IOException {
+                               Map<Integer, Bucket> latencyByRif, AtomicBoolean slow, int baseLatency, int slowMultiplier) throws IOException {
         HttpServer server = HttpServer.create(new InetSocketAddress(port), 0);
         server.createContext("/work", exchange -> {
-            // The query arrives now: RIF and latency must include any time
-            // spent queued on the capacity semaphore, or both signals go
-            // blind exactly when the replica is overloaded.
             int arrivalRif = rif.incrementAndGet();
             long start = System.currentTimeMillis();
             try {
                 capacity.acquire();
                 try {
-                    Thread.sleep(slow.get() ? 500 : 100);
+                    Thread.sleep(slow.get() ? (long) slowMultiplier * baseLatency : baseLatency);
                     byte[] response = "OK".getBytes();
                     exchange.sendResponseHeaders(200, response.length);
                     try (OutputStream os = exchange.getResponseBody()) {
@@ -123,8 +128,7 @@ public class BackendServer {
                 if (bucket == null || !bucket.hasSamples()) {
                     bucket = findNearestBucket(latencyByRif, currentRif);
                 }
-                // A replica that has never served a query reports 0: it is
-                // genuinely idle, so it should look attractive.
+
                 long medianLatency = bucket == null ? 0 : bucket.median();
 
                 String body = "{\"rif\":" + currentRif + ",\"latencyEstimateMillis\":" + medianLatency + "}";
@@ -143,6 +147,6 @@ public class BackendServer {
 
         server.setExecutor(Executors.newVirtualThreadPerTaskExecutor());
         server.start();
-        logger.info("Backend started on port " + port);
+        logger.info("Backend started on port " + port + " with seed: " + (int) (seed * 100));
     }
 }
