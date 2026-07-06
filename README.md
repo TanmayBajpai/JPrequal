@@ -59,7 +59,7 @@ Edit `proxy.conf`:
 ```properties
 port=8080
 replicas=localhost:9001,localhost:9002,localhost:9003,localhost:9004,localhost:9005,localhost:9006,localhost:9007,localhost:9008
-max_size=16
+max_size=6
 probing_rate=2
 rremove=1
 delta=1.0
@@ -69,8 +69,10 @@ probe_staleness_ms=1000
 recovery_interval_ms=5000
 max_failures=5
 max_retries=2
-request_timeout_ms=1000
+request_timeout_ms=5000
 ```
+
+The shipped `proxy.conf` uses the paper default `max_size=16`, which assumes a fleet of more than 16 replicas. `max_size` must be less than the number of replicas, so for this 8-backend demo it is lowered to 7.
 
 ### 4. Start the proxy
 
@@ -217,7 +219,7 @@ try (PrequalSelector selector = new PrequalSelector(config)) {
 | `recovery_interval_ms` | `5000` | Interval at which unhealthy replicas are re-probed for recovery. |
 | `max_failures` | `5` | Consecutive failures before a replica is marked unhealthy. |
 | `max_retries` | `2` | Maximum retry attempts for idempotent requests (GET, PUT, DELETE, HEAD). POST and PATCH are not retried. |
-| `request_timeout_ms` | `1000` | Timeout for upstream requests in milliseconds. |
+| `request_timeout_ms` | `5000` | Timeout for upstream requests in milliseconds. |
 
 ---
 
